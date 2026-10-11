@@ -1,0 +1,195 @@
+<!doctype html>
+<!--
+Tuft bench. Measures the judge on YOUR photos, fully in the browser.
+1) Add photos, tag each with a quest and whether it truly completes it.
+2) Run CLIP (open weights, in browser). Optionally also run a Gemma/LLaVA vision model via Ollama (needs OLLAMA_ORIGINS=*).
+3) Copy the results table into your post. Download the raw data for your repo.
+Keep POOL and NOISE identical to tuft.html so the numbers transfer.
+-->
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tuft bench</title>
+<style>
+:root{--ink:#10170f;--field:#c6d86a;--paper:#fbfbf6;--line:#b9c46a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--field);color:var(--ink);font:1rem/1.5 system-ui,sans-serif}
+main{max-width:46rem;margin:0 auto;padding:1.25rem}
+h1{font:800 2.4rem/1 system-ui;letter-spacing:-.03em;margin:.5rem 0}
+h2{font:800 1.3rem system-ui;margin:2rem 0 .5rem}
+p{margin:.4rem 0}.m{font-size:.9rem}
+button,.btn{font:700 1rem system-ui;padding:.7rem 1rem;border:2px solid var(--ink);border-radius:.7rem;background:var(--ink);color:var(--field);cursor:pointer;display:inline-block}
+button.alt,.btn.alt{background:transparent;color:var(--ink)}
+button[aria-pressed=true]{background:var(--ink);color:var(--field)}
+button[aria-pressed=false]{background:transparent;color:var(--ink)}
+button:disabled{opacity:.5}
+:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.card{display:grid;grid-template-columns:5rem 1fr;gap:.8rem;background:var(--paper);border-radius:.8rem;padding:.7rem;margin:.5rem 0}
+.card img{width:5rem;height:5rem;object-fit:cover;border-radius:.5rem}
+.card select{width:100%;padding:.5rem;font:inherit;border:2px solid var(--ink);border-radius:.5rem;background:#fff}
+.row{display:flex;gap:.4rem;margin-top:.4rem;flex-wrap:wrap}
+.row button{padding:.4rem .7rem;font-size:.9rem}
+pre{background:var(--paper);padding:1rem;border-radius:.8rem;overflow:auto;font-size:.82rem;white-space:pre-wrap}
+input[type=text]{padding:.5rem;font:inherit;border:2px solid var(--ink);border-radius:.5rem;background:#fff;width:100%}
+.miss{border-left:6px solid #b8325a}
+</style></head><body><main>
+<h1>Tuft bench</h1>
+<p>How good is a small open model at judging a nature photo? Find out on your own photos. Nothing leaves this page.</p>
+
+<h2>1. Add photos</h2>
+<p class="m">Aim for 30 or more. For each quest, take photos that really complete it and photos that look similar but do not. Label honestly, including the awkward ones.</p>
+<label class="btn" for="add">Add photos</label>
+<input id="add" type="file" accept="image/*" multiple hidden>
+<span id="count" class="m"></span>
+<div id="list"></div>
+
+<h2>2. Run the judges</h2>
+<p class="m">CLIP downloads about 150 MB the first time, then works offline.</p>
+<button id="runclip">Run CLIP</button>
+<p class="m" style="margin-top:1rem">Optional vision model through Ollama:</p>
+<input type="text" id="ou" value="http://localhost:11434" aria-label="Ollama address">
+<input type="text" id="om" value="gemma3:4b" aria-label="Ollama model" style="margin-top:.4rem">
+<button id="runol" class="alt" style="margin-top:.5rem">Run Ollama model</button>
+<p id="status" class="m" role="status"></p>
+
+<h2>3. Results</h2>
+<pre id="md">Run a judge to see results.</pre>
+<button id="copy" class="alt">Copy table</button>
+<button id="dl" class="alt">Download data</button>
+<h2>Where it was wrong</h2>
+<div id="misses"></div>
+</main>
+
+<script type="module">
+const $=s=>document.querySelector(s);
+const CDN='https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2';
+const POOL=[
+ ['Find a leaf with a jagged edge','a close-up of a leaf with serrated edges'],
+ ['Find something yellow that grew there','a yellow flower or yellow leaf outdoors'],
+ ['Find moss or lichen','moss or lichen growing on a surface'],
+ ['Find a tree older than your building','a large old tree trunk'],
+ ['Find an insect doing something','an insect on a plant'],
+ ['Find a shadow with a shape','a long shadow on the ground'],
+ ['Find sky between branches','sky seen through tree branches'],
+ ['Find a seed or a fruit','seeds or a fruit on a plant'],
+ ['Find the smallest flower you can','a tiny flower'],
+ ['Find a bird, or where one has been','a bird or a feather']];
+const NOISE=['a room indoors','a computer screen','a human face','a plain wall','a road','a blurry photo'];
+let items=[],clip,nid=0;
+const el=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e};
+const pct=x=>(100*x).toFixed(1)+'%';
+const med=a=>{if(!a.length)return'n/a';const s=[...a].sort((x,y)=>x-y);return Math.round(s[s.length>>1])+' ms'};
+const wil=(k,n)=>{if(!n)return'';const z=1.96,p=k/n,d=1+z*z/n,c=p+z*z/(2*n),m=z*Math.sqrt(p*(1-p)/n+z*z/(4*n*n));return`${pct(Math.max(0,(c-m)/d))} to ${pct(Math.min(1,(c+m)/d))}`};
+const lg=n=>{let s=0;for(let i=2;i<=n;i++)s+=Math.log(i);return s};
+const mcn=(b,c)=>{const n=b+c;if(!n)return 1;let s=0;for(let i=0;i<=Math.min(b,c);i++)s+=Math.exp(lg(n)-lg(i)-lg(n-i)-n*Math.LN2);return Math.min(1,2*s)};
+const rng=a=>()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296};
+const status=t=>$('#status').textContent=t;
+
+$('#add').onchange=async e=>{
+  for(const f of e.target.files){
+    try{
+      const b=await createImageBitmap(f),s=Math.min(1,640/Math.max(b.width,b.height)),c=document.createElement('canvas');
+      c.width=b.width*s;c.height=b.height*s;c.getContext('2d').drawImage(b,0,0,c.width,c.height);
+      items.push({id:nid++,u:c.toDataURL('image/jpeg',.8),q:0,truth:true});
+    }catch{status('Skipped one photo this browser could not read.')}
+  }
+  e.target.value='';draw();
+};
+function draw(){
+  $('#count').textContent=items.length?` ${items.length} photos`:'';
+  const L=$('#list');L.replaceChildren();
+  items.forEach((it,i)=>{
+    const c=el('div','card'),img=el('img');img.src=it.u;img.alt='';
+    const d=el('div'),sel=el('select');sel.setAttribute('aria-label','Quest');
+    POOL.forEach((p,k)=>{const o=el('option','',p[0]);o.value=k;sel.append(o)});
+    sel.value=it.q;sel.onchange=()=>it.q=+sel.value;
+    const row=el('div','row'),y=el('button','','Completes it'),n=el('button','','Does not'),x=el('button','alt','Remove');
+    const set=()=>{y.setAttribute('aria-pressed',it.truth);n.setAttribute('aria-pressed',!it.truth)};set();
+    y.onclick=()=>{it.truth=true;set()};n.onclick=()=>{it.truth=false;set()};
+    x.onclick=()=>{items.splice(i,1);draw()};
+    row.append(y,n,x);d.append(sel,row);c.append(img,d);L.append(c);
+  });
+}
+
+async function runClip(){
+  clip??=await(await import(CDN)).pipeline('zero-shot-image-classification','Xenova/clip-vit-base-patch32');
+  for(const [i,it] of items.entries()){
+    status(`CLIP ${i+1} of ${items.length}`);
+    const lab=POOL[it.q][1],t0=performance.now(),a=await clip(it.u,[lab,...NOISE]);
+    it.cms=performance.now()-t0;it.p=a.find(x=>x.label===lab).score;it.top=a[0].label;it.def=a[0].label===lab||it.p>.25;
+  }
+}
+async function chat(content,img){
+  const r=await fetch($('#ou').value+'/api/chat',{method:'POST',signal:AbortSignal.timeout(120000),
+    body:JSON.stringify({model:$('#om').value,stream:false,format:'json',messages:[{role:'user',content,images:[img]}]})});
+  if(!r.ok)throw new Error('Ollama '+r.status);
+  return JSON.parse((await r.json()).message.content);
+}
+async function runOl(){
+  let bad=0;
+  for(const [i,it] of items.entries()){
+    status(`${$('#om').value} ${i+1} of ${items.length}`);
+    const t0=performance.now();
+    try{
+      const j=await chat(`Quest: "${POOL[it.q][0]}". Does the photo complete it? Reply JSON: {"match":true or false}`,it.u.split(',')[1]);
+      it.g=!!j.match;it.gms=performance.now()-t0;
+    }catch{it.g=null;bad++}
+  }
+  if(bad)status(`${bad} photos failed in Ollama and are left out of its numbers.`);
+}
+
+const stat=(rows,pred)=>{
+  const P=rows.filter(r=>r.truth),N=rows.filter(r=>!r.truth);
+  const tp=P.filter(pred).length,fp=N.filter(pred).length;
+  return{n:rows.length,ok:tp+N.length-fp,tp,P:P.length,fp,N:N.length};
+};
+const line=(name,s,ms)=>`| ${name} | ${s.ok}/${s.n} = ${pct(s.ok/s.n)} (95% CI ${wil(s.ok,s.n)}) | ${s.tp}/${s.P} | ${s.fp}/${s.N} | ${ms} |`;
+const HEAD='| Judge | Correct | Real completions caught | False passes | Median time |\n|---|---|---|---|---|';
+
+function analyze(){
+  const rows=items.filter(r=>r.p!=null);
+  if(rows.length<8){$('#md').textContent='Add and run at least 8 photos first.';return}
+  const pos=rows.filter(r=>r.truth).length;
+  let out=`**${rows.length} of my own photos (${pos} complete their quest, ${rows.length-pos} do not)**\n\n${HEAD}\n`;
+  out+=line('CLIP, default rule',stat(rows,r=>r.def),med(rows.map(r=>r.cms)))+'\n';
+  const g=rows.filter(r=>r.g!=null);
+  if(g.length)out+=line(`${$('#om').value} via Ollama`,stat(g,r=>r.g),med(g.map(r=>r.gms)))+'\n';
+
+  const r=rng(7),idx=rows.map((_,i)=>i);
+  for(let i=idx.length-1;i>0;i--){const j=Math.floor(r()*(i+1));[idx[i],idx[j]]=[idx[j],idx[i]]}
+  const A=idx.slice(0,idx.length>>1).map(i=>rows[i]),B=idx.slice(idx.length>>1).map(i=>rows[i]);
+  let t=.25,best=-1;
+  for(let c=.02;c<.99;c+=.02){
+    const k=stat(A,x=>x.p>=c).ok;
+    if(k>best||(k===best&&Math.abs(c-.25)<Math.abs(t-.25))){best=k;t=c}
+  }
+  const cal=x=>x.p>=t;
+  out+=`\n**Held-out half (${B.length} photos). Threshold ${t.toFixed(2)} was chosen on the other ${A.length}.**\n\n${HEAD}\n`;
+  out+=line('CLIP, default rule',stat(B,x=>x.def),'')+'\n';
+  out+=line('CLIP, calibrated threshold',stat(B,cal),'')+'\n';
+  const ans=B.filter(x=>Math.abs(x.p-t)>=.08);
+  const sa=stat(ans,cal);
+  out+=line(`CLIP calibrated, says "can't tell" on ${B.length-ans.length} of ${B.length}`,sa,'')+'\n';
+  let b=0,c=0;B.forEach(x=>{const a=cal(x)===x.truth,d=x.def===x.truth;if(a&&!d)b++;if(!a&&d)c++});
+  out+=`\nPaired on the held-out half: only the calibrated rule right on ${b}, only the default right on ${c}, exact McNemar p = ${mcn(b,c).toFixed(3)}.\n`;
+  out+=`\nSmall samples give wide intervals. Say so in the post.`;
+  $('#md').textContent=out;
+
+  const M=$('#misses');M.replaceChildren();
+  rows.filter(x=>x.def!==x.truth).forEach(x=>{
+    const c=el('div','card miss'),img=el('img');img.src=x.u;img.alt='';
+    const d=el('div');
+    d.append(el('b','',POOL[x.q][0]),el('p','m',`Truth: ${x.truth?'completes it':'does not'}. CLIP gave the quest ${pct(x.p)} and ranked "${x.top}" first.`));
+    c.append(img,d);M.append(c);
+  });
+  if(!M.children.length)M.textContent='No misses with the default rule.';
+}
+
+$('#runclip').onclick=async()=>{if(!items.length)return;try{await runClip();status('CLIP done.');analyze()}catch(e){status('CLIP failed: '+e.message+'. The first run needs a connection.')}};
+$('#runol').onclick=async()=>{if(!items.length)return;await runOl();if(items.some(x=>x.p!=null))analyze();else status('Run CLIP too, so the tables can compare.')};
+$('#copy').onclick=()=>navigator.clipboard?.writeText($('#md').textContent).then(()=>status('Copied.'));
+$('#dl').onclick=()=>{
+  const data=items.map(({u,...r})=>r);
+  const a=el('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(data,null,1)],{type:'application/json'}));
+  a.download='tuft-bench-data.json';a.click();
+};
+</script></body></html>
